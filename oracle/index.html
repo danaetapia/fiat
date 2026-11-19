@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OPERATIONAL — CLOSURE</title>
+<!-- Fiat / Operational Closure. Digital Witchcraft Institute. GPL-3.0.
+     The model writes nothing that is shown. It reads the input phrase and returns
+     parameters; the field is rendered from those. Its reading of the phrase is
+     visible as continuity, density, weight, temperature and drift.
+     Serve this folder from a local server (see README); do not open it as file://.
+     CONFIG.SOURCE: "ollama" | "demo"
+     The vocabulary lives in lexicon.js. The source images live in sources/. -->
+<style>
+  :root {
+    --ground:#0D0A0A; --fg:#FFFFFF; --dim:#5a4a48; --faint:#2a1f1e;
+    --display:"Helvetica Neue", Helvetica, Arial, sans-serif;
+    --mono: ui-monospace,"SF Mono","Menlo","DejaVu Sans Mono","Courier New",monospace;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { height:100%; background:var(--ground); color:var(--fg);
+              font-family:var(--mono); overflow:hidden; cursor:none; }
+
+  /* ---------------- the field ---------------- */
+  .field { position:fixed; inset:0; z-index:0; overflow:hidden;
+           transition:opacity 2600ms ease; }
+  .field.out { opacity:0; }
+  .layer { position:absolute; will-change:transform;
+           image-rendering:pixelated;          /* discrete cells stay hard */
+           transform-origin:center center; }
+
+  @keyframes driftA {
+    from { transform:translate3d(0,0,0) scale(var(--s)) rotate(0deg); }
+    to   { transform:translate3d(6vw,-4vh,0) scale(calc(var(--s) * 1.16)) rotate(4deg); }
+  }
+  @keyframes driftB {
+    from { transform:translate3d(0,0,0) scale(calc(var(--s) * 1.08)) rotate(0deg) scaleX(-1); }
+    to   { transform:translate3d(-8vw,5vh,0) scale(calc(var(--s) * 0.94)) rotate(-6deg) scaleX(-1); }
+  }
+  @keyframes driftC {
+    from { transform:translate3d(0,0,0) scale(calc(var(--s) * 0.96)) rotate(2deg); }
+    to   { transform:translate3d(4vw,7vh,0) scale(calc(var(--s) * 1.22)) rotate(-3deg); }
+  }
+
+  .scrim { position:fixed; inset:0; z-index:1; pointer-events:none;
+    background:
+      radial-gradient(130% 100% at 58% 50%, rgba(13,10,10,0.26) 0%, rgba(13,10,10,0.56) 68%, rgba(13,10,10,0.80) 100%),
+      linear-gradient(90deg, rgba(13,10,10,0.40) 0%, rgba(13,10,10,0.14) 34%, rgba(13,10,10,0.26) 100%);
+  }
+
+  /* ---------------- content ---------------- */
+  .wall { position:relative; z-index:2; height:100vh;
+          display:flex; flex-direction:column; padding:3.2vh 3vw; }
+  .chrome { display:flex; justify-content:space-between; font-size:11px;
+            letter-spacing:0.2em; color:var(--dim); text-transform:uppercase; flex:0 0 auto; }
+  .chrome.hidden { visibility:hidden; }
+  .tag { border:1px solid var(--faint); padding:3px 8px; margin-right:10px; }
+  .chrome-bottom { margin-top:auto; padding-top:1.6vh; }
+
+  .stage { flex:1 1 auto; display:flex; align-items:flex-end; min-height:0; position:relative; }
+  /* horizontal, one constant size, free to land anywhere on the wall */
+  .seed {
+    position:fixed; z-index:2;
+    white-space:nowrap;
+    font-family:var(--display); font-weight:800; font-size:58px;
+    letter-spacing:-0.025em; line-height:1; text-transform:uppercase;
+    color:var(--fg); text-shadow:0 0 70px rgba(0,0,0,.8), 0 0 20px rgba(0,0,0,.6);
+    opacity:0; transition:opacity 2200ms ease;
+  }
+  .seed.on { opacity:1; }
+
+  .readout { position:absolute; right:0; bottom:0; text-align:right;
+             font-size:11px; letter-spacing:0.2em; color:var(--dim);
+             text-transform:uppercase; line-height:2;
+             opacity:0; transition:opacity 1600ms ease; }
+  .readout.on { opacity:1; }
+
+  .boot { position:fixed; z-index:3; bottom:2.2vh; left:0; right:0; text-align:center;
+          font-size:11px; letter-spacing:.18em; text-transform:uppercase;
+          color:var(--dim); padding:0 3vw; transition:opacity 800ms ease; }
+  .boot.off { opacity:0; }
+</style>
+</head>
+<body>
+
+<div class="seed" id="seed">&nbsp;</div>
+
+<div class="field" id="field">
+  <canvas class="layer" id="L0"></canvas>
+  <canvas class="layer" id="L1"></canvas>
+  <canvas class="layer" id="L2"></canvas>
+</div>
+<div class="scrim"></div>
+
+<div class="wall">
+  <div class="chrome" id="chromeTop">
+    <div><span class="tag">[FIELD]</span><span id="modeLabel">&nbsp;</span></div>
+    <div id="statusLine">OFFLINE / LOCAL WEIGHTS</div>
+  </div>
+
+  <div class="stage">
+    <div class="readout" id="readout"></div>
+  </div>
+
+  <div class="chrome chrome-bottom" id="chromeBottom">
+    <div>DIGITAL WITCHCRAFT INSTITUTE</div><div></div>
+  </div>
+</div>
+
+<div class="boot" id="boot">INITIALISING</div>
+
+<script src="lexicon.js"></script>
+<script>
+(function () {
+"use strict";
+
+var CONFIG = {
+  SOURCE: "ollama",                    // "ollama" | "demo" (no model)
+  OLLAMA_URL:   "http://localhost:11434/api/chat",
+  OLLAMA_MODEL: "llama3.1:8b",
+
+  SEED_VW: 3.0,                      // constant phrase size, as a fraction of width
+  HOLD_MS: 26000,                    // how long a field is held before the next word
+  CLEAR_MS: 2600,                    // crossfade between fields
+  TEMPERATURE: 0.9,
+  MAX_TOKENS: 220
+};
+
+/* ------------------------------- sources ------------------------------- */
+var SRC = {                          /* form only: colour comes from the red ramp */
+  a: "sources/a.webp",
+  b: "sources/b.webp",
+  c: "sources/c.webp"
+};
+var SOURCE_KEYS = Object.keys(SRC);
+var IMG = {}, imagesReady = false;
+function loadImages() {
+  var keys = Object.keys(SRC), n = 0;
+  return new Promise(function (res) {
+    keys.forEach(function (k) {
+      var im = new Image();
+      im.onload = im.onerror = function () { if (++n === keys.length) { imagesReady = true; res(); } };
+      im.src = SRC[k]; IMG[k] = im;
+    });
+  });
+}
+
+/* ------------------------------- corpus -------------------------------- */
+var LEX   = window.LEXICON || {};
+var NOUNS = LEX.nouns || [];
+var NAMES = LEX.names || [];
+var VERBS = LEX.verbs || [];
+var ADJ   = LEX.adjectives || [];
+/* ------------------------- two-word combinations -------------------------
+   Four shapes, each with its own agreement rule:
+     noun + verb   the verb agrees with the noun   ("salt burns", "dogs burn")
+     verb + verb   both in present tense, dashed   ("burn \u2014 forgive")
+     adj  + adj    juxtaposed                      ("filthy sacred")
+     noun + noun   juxtaposed                      ("salt mirror")
+   Names count as singular nouns. ---------------------------------------- */
+
+var IRREGULAR_PLURAL = ["women","children","people"].concat(LEX.irregularPlural || []);
+/* singular nouns that happen to end in s */
+var SINGULAR_S = ["unconscious","vertigo","chaos"].concat(LEX.singularS || []);
+
+function isPlural(n) {
+  if (IRREGULAR_PLURAL.indexOf(n) !== -1) return true;
+  if (SINGULAR_S.indexOf(n) !== -1) return false;
+  if (NAMES.indexOf(n) !== -1) return false;         /* proper nouns are singular */
+  return /s$/.test(n) && !/ss$/.test(n);
+}
+
+/* third person singular: goes / kisses / cries / destroys / loves */
+function third(v) {
+  if (/(s|sh|ch|x|z|o)$/.test(v)) return v + "es";
+  if (/[^aeiou]y$/.test(v))       return v.slice(0, -1) + "ies";
+  return v + "s";
+}
+
+function pick(a) { return a[Math.floor(Math.random() * a.length)]; }
+
+var SUBJECTS = NOUNS.concat(NAMES);
+var _recent = [];
+
+function pickPair() {
+  var shape, display, guard = 0;
+  do {
+    var r = Math.random();
+    if (r < 0.46) {                                   /* noun + verb */
+      var n = pick(SUBJECTS), v = pick(VERBS);
+      display = n + " " + (isPlural(n) ? v : third(v));
+      shape = "noun+verb";
+    } else if (r < 0.66) {                            /* verb + verb */
+      var v1 = pick(VERBS), v2 = pick(VERBS);
+      while (v2 === v1) v2 = pick(VERBS);
+      display = v1 + " \u2014 " + v2;
+      shape = "verb+verb";
+    } else if (r < 0.85) {                            /* adjective pair */
+      var a1 = pick(ADJ), a2 = pick(ADJ);
+      while (a2 === a1) a2 = pick(ADJ);
+      display = a1 + " " + a2;
+      shape = "adj+adj";
+    } else {                                          /* noun pair */
+      var n1 = pick(SUBJECTS), n2 = pick(SUBJECTS);
+      while (n2 === n1) n2 = pick(SUBJECTS);
+      display = n1 + " " + n2;
+      shape = "noun+noun";
+    }
+    guard++;
+  } while (_recent.indexOf(display) !== -1 && guard < 200);
+
+  _recent.push(display);
+  if (_recent.length > 40) _recent.shift();
+  return { display: display, shape: shape };
+}
+
+/* ------------------------------- prompt -------------------------------- */
+var SYSTEM_PROMPT =
+"You are the sensory layer of a system. A short phrase of two words arrives. You do not write about it, describe it, or explain it. You return ONLY a JSON object describing how a visual field should behave in response to that word. No prose, no markdown, no code fence, no commentary. Only the object.\n\n" +
+"Schema. Every value is a number between 0 and 1 unless stated:\n" +
+"  continuity  0 = the field breaks into hard discrete cells; 1 = it stays a smooth continuous flow\n" +
+"  density     how much of the frame is filled\n" +
+"  scale       0.6 to 2.2, how close the field sits to the surface\n" +
+"  drift       how fast it moves; 0 is nearly still\n" +
+"  grain       roughness of the surface\n" +
+"  temperature 0 is a cold deep crimson, 1 is a hot orange red\n" +
+"  weight      0 is sharp and brittle, 1 is soft and heavy\n" +
+"  symmetry    0 is asymmetric, 1 is mirrored\n" +
+"  source      one of " + SOURCE_KEYS.map(function (k) { return "\"" + k + "\""; }).join(", ") + "\n\n" +
+"Decide with conviction. Phrases that are countable, factual, institutional or brittle push continuity down. Phrases that are bodily, wet, drifting, erotic or emotional push it up. Never hedge toward the middle: commit to the reading, including when it is an absurd one.\n\n" +
+"Example of the exact output format:\n" +
+"{\"continuity\":0.18,\"density\":0.74,\"scale\":1.35,\"drift\":0.22,\"grain\":0.61,\"temperature\":0.3,\"weight\":0.15,\"symmetry\":0.8,\"source\":\"" + SOURCE_KEYS[0] + "\"}\n\n" +
+"Return only the JSON object.";
+
+/* --------------------------- parameter safety --------------------------- */
+function hash(str) { var h=2166136261; for (var i=0;i<str.length;i++){h^=str.charCodeAt(i);h=Math.imul(h,16777619);} return (h>>>0)/4294967295; }
+function clamp(v,a,b){ v=parseFloat(v); if (!isFinite(v)) return null; return Math.max(a,Math.min(b,v)); }
+
+/* If the model returns nothing usable, the field still has to appear. These
+   defaults are derived from the word itself, so they are stable and varied
+   rather than random, and the wall can never go blank. */
+function fallbackParams(word) {
+  var h = hash(word), h2 = hash(word + "x"), h3 = hash(word + "y");
+  return { continuity:h, density:0.45+h2*0.45, scale:0.8+h3*1.1, drift:0.15+h2*0.5,
+           grain:h3, temperature:h2, weight:h, symmetry:h3,
+           source:SOURCE_KEYS[Math.floor(h*SOURCE_KEYS.length)%SOURCE_KEYS.length], _fallback:true };
+}
+
+function parseParams(raw, word) {
+  var txt = String(raw || "");
+  var a = txt.indexOf("{"), b = txt.lastIndexOf("}");
+  if (a === -1 || b === -1 || b < a) return fallbackParams(word);
+  var obj;
+  try { obj = JSON.parse(txt.slice(a, b+1)); } catch (e) { return fallbackParams(word); }
+  var f = fallbackParams(word), out = {};
+  ["continuity","density","drift","grain","temperature","weight","symmetry"].forEach(function (k) {
+    var v = clamp(obj[k],0,1); out[k] = (v===null? f[k] : v);
+  });
+  var sc = clamp(obj.scale,0.6,2.2); out.scale = (sc===null? f.scale : sc);
+  out.source = (SRC[obj.source] ? obj.source : f.source);
+  return out;
+}
+
+/* ------------------------------ rendering ------------------------------ */
+/* One draw per word, then CSS transforms do the motion. Continuity decides
+   the cell count and how many tones survive: a continuous field is drawn at
+   high resolution, a discrete one collapses into a few hard values. */
+function renderLayer(canvas, params, layerIndex) {
+  var img = IMG[params.source];
+  if (!img || !img.width) return;
+
+  var c = params.continuity;
+  var cells  = Math.round(12 + Math.pow(c, 1.5) * 628);     /* 12 .. 640 */
+  var levels = Math.round(3  + Math.pow(c, 1.4) * 25);      /* 3 .. 28 tones */
+
+  var off = document.createElement("canvas");
+  off.width = off.height = cells;
+  var oc = off.getContext("2d");
+  oc.clearRect(0,0,cells,cells);
+  oc.drawImage(img, 0, 0, cells, cells);
+
+  var d = oc.getImageData(0,0,cells,cells), px = d.data;
+
+  /* The sources contribute form, not colour. Every pixel is reduced to
+     luminance and remapped through a red ramp, so the palette belongs to the
+     work rather than to whichever image the model chose. Quantising the
+     luminance BEFORE the mapping is what makes a discrete reading visible:
+     few tones, hard bands. */
+  var warm = params.temperature;
+  var lerp = function (a,b,t) { return a + (b-a)*t; };
+  var r0=lerp(64,86,warm),  g0=lerp(6,12,warm),   b0=lerp(10,4,warm);     /* shadow  */
+  var r1=lerp(214,255,warm),g1=lerp(30,74,warm),  b1=lerp(28,30,warm);    /* body    */
+  var r2=lerp(255,255,warm),g2=lerp(126,190,warm),b2=lerp(110,140,warm);  /* highlight */
+
+  var q = levels - 1;
+  var grainAmt = params.grain * 0.16 * (1 - c * 0.5);
+
+  /* Sources differ in how bright they are. Without normalising, a low tone
+     count drops the whole field into the shadow band and the wall goes black.
+     Measure the actual range first, then stretch it across the ramp. */
+  var lo = 1, hi = 0, k;
+  for (k = 0; k < px.length; k += 4) {
+    if (px[k+3] < 8) continue;
+    var lv = (0.299*px[k] + 0.587*px[k+1] + 0.114*px[k+2]) / 255;
+    if (lv < lo) lo = lv;
+    if (lv > hi) hi = lv;
+  }
+  var span = (hi - lo) < 0.04 ? 0.04 : (hi - lo);
+
+  for (var i = 0; i < px.length; i += 4) {
+    if (px[i+3] === 0) continue;
+    var t = ((0.299*px[i] + 0.587*px[i+1] + 0.114*px[i+2]) / 255 - lo) / span;
+    if (grainAmt) t += (Math.random() - 0.5) * grainAmt;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    t = Math.round(t * q) / q;                       /* the quantisation step */
+
+    var r,g,b;
+    if (t < 0.5) { var u = t*2;        r=lerp(r0,r1,u); g=lerp(g0,g1,u); b=lerp(b0,b1,u); }
+    else         { var v = (t-0.5)*2;  r=lerp(r1,r2,v); g=lerp(g1,g2,v); b=lerp(b1,b2,v); }
+    px[i]=r; px[i+1]=g; px[i+2]=b;
+  }
+  oc.putImageData(d,0,0);
+
+  canvas.width = canvas.height = cells;
+  var ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = c > 0.5;
+  ctx.clearRect(0,0,cells,cells);
+  ctx.drawImage(off,0,0);
+
+  /* hard cells stay hard; continuous fields are allowed to interpolate */
+  canvas.style.imageRendering = c < 0.5 ? "pixelated" : "auto";
+  canvas.style.mixBlendMode  = layerIndex === 0 ? "normal" : "screen";
+
+  /* geometry and motion per layer */
+  var base = [1.30, 1.05, 1.62][layerIndex];
+  var side = base * params.scale * 100;
+  var tops = [-24, -6, -40], lefts = [-34, 34, 2];
+  canvas.style.width  = side + "vw";
+  canvas.style.height = side + "vw";
+  canvas.style.top    = (tops[layerIndex] * params.scale) + "vw";
+  canvas.style.left   = (lefts[layerIndex] + (params.symmetry - 0.5) * 18) + "vw";
+
+  var op = [0.62, 0.44, 0.22][layerIndex] * (0.45 + params.density * 0.85);
+  canvas.style.opacity = Math.min(0.95, op);
+
+  /* weight: soft and heavy versus sharp and brittle. Continuous fields may
+     blur; discrete ones must stay hard or the cells dissolve. */
+  var blur = params.weight * 34 * c;
+  canvas.style.filter = blur > 0.6 ? "blur(" + blur.toFixed(1) + "px)" : "none";
+
+  var secs = Math.round(520 - params.drift * 390);           // 520s .. 130s
+  canvas.style.setProperty("--s", (0.98 + layerIndex * 0.04).toFixed(2));
+  canvas.style.animation = ["driftA","driftB","driftC"][layerIndex] + " " +
+                           (secs + layerIndex * 46) + "s ease-in-out infinite alternate";
+}
+
+function renderField(params) {
+  for (var i = 0; i < 3; i++) renderLayer(document.getElementById("L"+i), params, i);
+}
+
+/* ------------------------------- sources ------------------------------- */
+function fetchOllama(word) {
+  return fetch(CONFIG.OLLAMA_URL, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({
+      model: CONFIG.OLLAMA_MODEL, stream:false, format:"json",
+      messages:[{role:"system",content:SYSTEM_PROMPT},{role:"user",content:word}],
+      options:{ temperature:CONFIG.TEMPERATURE, num_predict:CONFIG.MAX_TOKENS }
+    })
+  }).then(function(r){ if(!r.ok) throw new Error("ollama "+r.status); return r.json(); })
+   .then(function(d){ var t=d&&d.message&&d.message.content; if(!t) throw new Error("ollama: empty"); return t; });
+}
+
+function fetchDemo(word) {
+  /* no model: the word decides the field by itself */
+  return new Promise(function(r){ setTimeout(function(){ r(JSON.stringify(fallbackParams(word))); }, 260); });
+}
+
+function generate(word) {
+  if (CONFIG.SOURCE === "ollama") return fetchOllama(word);
+  return fetchDemo(word);
+}
+
+/* -------------------------------- runtime ------------------------------- */
+var seedEl=document.getElementById("seed"), fieldEl=document.getElementById("field"),
+    modeEl=document.getElementById("modeLabel"), statusEl=document.getElementById("statusLine"),
+    readEl=document.getElementById("readout"), bootEl=document.getElementById("boot");
+
+var hasRendered=false, lastError=null, startedAt=Date.now();
+function boot(m){ if(!hasRendered) bootEl.textContent=m; }
+function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
+
+var queue=[], producing=false, failures=0;
+function nextItem() {
+  var pair = pickPair(), word = pair.display;
+  return generate(word)
+    .then(function(raw){ return { word:word, params:parseParams(raw, word) }; })
+    .catch(function(err){
+      failures++;
+      statusEl.textContent = "RETRYING";
+      lastError = "NO PARAMETERS FROM '" + CONFIG.SOURCE + "' \u2014 " + err.message;
+      boot(lastError + " / the field is falling back to the word itself");
+      console.log("[OC] " + err.message);
+      return { word:word, params:fallbackParams(word) };   /* never blank */
+    });
+}
+function produce() {
+  if (producing || queue.length >= 2) return;
+  producing = true;
+  (function step(){
+    if (queue.length >= 2) { producing = false; return; }
+    nextItem().then(function(it){
+      queue.push(it);
+      if (!it.params._fallback) {
+        statusEl.textContent = CONFIG.SOURCE==="ollama" ? "OFFLINE / LOCAL WEIGHTS"
+                             : "DEMO / WORD-DERIVED FIELD";
+      }
+      step();
+    });
+  })();
+}
+setInterval(produce, 3000);
+
+function take() {
+  if (queue.length) { produce(); return Promise.resolve(queue.shift()); }
+  produce();
+  if (!lastError) boot("WAITING FOR FIRST FIELD \u2014 " + Math.round((Date.now()-startedAt)/1000) + "S");
+  return sleep(1000).then(take);
+}
+
+/* one constant size for every phrase, and a fresh position each time */
+function sizeSeed() {
+  seedEl.style.fontSize = (window.innerWidth * CONFIG.SEED_VW / 100).toFixed(1) + "px";
+}
+
+function placeSeed() {
+  sizeSeed();
+  seedEl.style.left = "0px"; seedEl.style.top = "0px";
+  var w = seedEl.offsetWidth, h = seedEl.offsetHeight;
+  var mx = window.innerWidth  * 0.055;
+  var my = window.innerHeight * 0.115;             /* clear of the chrome lines */
+  var maxX = window.innerWidth  - w - mx;
+  var maxY = window.innerHeight - h - my;
+  if (maxX < mx) maxX = mx;
+  if (maxY < my) maxY = my;
+  seedEl.style.left = (mx + Math.random() * (maxX - mx)).toFixed(0) + "px";
+  seedEl.style.top  = (my + Math.random() * (maxY - my)).toFixed(0) + "px";
+}
+
+function readingOf(p) {
+  var c = p.continuity;
+  var mode = c < 0.28 ? "DISCRETE" : c > 0.72 ? "CONTINUOUS" : "MIXED";
+  var bar = "";
+  for (var i=0;i<12;i++) bar += (i < Math.round(c*12) ? "\u2588" : "\u2591");
+  return { mode: mode, bar: bar };
+}
+
+function round() {
+  take().then(function(it){
+    if (!hasRendered) { hasRendered = true; bootEl.classList.add("off"); }
+    /* fade the whole field and the word out together */
+    fieldEl.classList.add("out");
+    seedEl.classList.remove("on");
+    readEl.classList.remove("on");
+    return sleep(CONFIG.CLEAR_MS).then(function(){
+      renderField(it.params);
+      seedEl.textContent = it.word;
+      placeSeed();
+      var r = readingOf(it.params);
+      modeEl.textContent = r.mode;
+      readEl.innerHTML = r.mode + "<br>" + r.bar;
+      fieldEl.classList.remove("out");
+      void seedEl.offsetWidth;
+      seedEl.classList.add("on");
+      readEl.classList.add("on");
+      return sleep(CONFIG.HOLD_MS);
+    });
+  }).then(round).catch(function(e){ console.log("[OC] "+e.message); setTimeout(round,4000); });
+}
+
+window.addEventListener("resize", placeSeed);
+window.addEventListener("keydown", function(e){
+  if (e.key === "c") {
+    document.getElementById("chromeTop").classList.toggle("hidden");
+    document.getElementById("chromeBottom").classList.toggle("hidden");
+    readEl.classList.toggle("hidden");
+  }
+  if (e.key === "f") {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen();
+  }
+});
+
+/* preview hook: force a parameter set from the console, e.g.
+   __field("salt", {continuity:0.05, temperature:0.1, source:"a"})
+   Useful during install to see the extremes without waiting for the model. */
+window.__field = function (word, params) {
+  var p = parseParams(JSON.stringify(params || {}), word || "test");
+  renderField(p);
+  seedEl.textContent = word || "test";
+  placeSeed(); seedEl.classList.add("on");
+  var r = readingOf(p);
+  modeEl.textContent = r.mode;
+  readEl.innerHTML = r.mode + "<br>" + r.bar;
+  readEl.classList.add("on");
+  fieldEl.classList.remove("out");
+  return p;
+};
+
+loadImages().then(function(){ produce(); round(); });
+
+})();
+</script>
+</body>
+</html>
